@@ -1,4 +1,4 @@
-use std::{cmp::PartialEq, error::Error, fmt, vec::Vec};
+use std::{cmp::PartialEq, fmt, vec::Vec};
 use serde::{Serialize, Deserialize};
 use url::Url;
 
@@ -59,7 +59,7 @@ impl SchemeWWW {
         }
     }
 
-    pub fn from_str(text: &str) -> Result<Self, UrlParseError> {
+    pub fn from_str(text: &str) -> Result<Self, SchemeParseError> {
         let scheme = match text {
             "http://" => SchemeWWW::Http,
             "https://" => SchemeWWW::Https,
@@ -69,7 +69,7 @@ impl SchemeWWW {
             "https://ww2." => SchemeWWW::HttpsWW2,
             "http://www2." => SchemeWWW::HttpWWW2,
             "https://www2." => SchemeWWW::HttpsWWW2,
-            _ => return Err(UrlParseError{details: format!("{} is not a recognized scheme!", text)})
+            _ => return Err(SchemeParseError{provided: text.to_string()})
         };
         Ok(scheme)
     }
@@ -82,7 +82,7 @@ impl ParsedSubDomain {
         format!("{}{}{}", self.sub_prefix, self.domain.phrase, self.domain.tsld)
     }
 
-    pub fn from_str(subdomain: &str) -> Result<Self, UrlParseError> {
+    pub fn from_str(subdomain: &str) -> Result<Self, SubDomainParseError> {
         // given a subdomain string (with the www already dropped), Decompose it into a subdomain
         let subdomain_lowercase = subdomain.trim().to_lowercase(); // for matching TSLD
         // try second level domains first becasue they "include" top-level domains
@@ -98,19 +98,19 @@ impl ParsedSubDomain {
             }
         }
         // if you reach this point, you might have a bad url
-        return Err(UrlParseError{details:format!("Unable to identify a known top or second-level domain in '{}'", subdomain)})
+        return Err(SubDomainParseError::UnknownTSLD(subdomain.to_string()))
     }
 
-    fn from_str_and_tsld(subdomain_lowercase: &str, tsld: &'static str) -> Result<Self, UrlParseError> {
+    fn from_str_and_tsld(subdomain_lowercase: &str, tsld: &'static str) -> Result<Self, SubDomainParseError> {
         // if you know a subdomain ends with a top/second level domain, this will split it and return a SubDomain
         if !subdomain_lowercase.ends_with(tsld) {
-            return Err(UrlParseError{details:format!("The subdomain '{}' does not end with the specified tsld '{}'", subdomain_lowercase, tsld)})
+            return Err(SubDomainParseError::MismatchTSLD(subdomain_lowercase.to_string(), tsld.to_string()))
         }
         let pre_tsld = subdomain_lowercase.replace(tsld, "");
         let sp: Vec<&str> = pre_tsld.split(".").collect(); // split everythng before the TSLD
         let spl = sp.len();
         let (sub_prefix, phrase) = match spl {
-            0 => return Err(UrlParseError{details: format!("nothing but the top/second level domain '{}' was provided!", subdomain_lowercase)}),
+            0 => return Err(SubDomainParseError::JustTSLD),
             1 => (String::new(), pre_tsld), // None indicates there is no subdomain prefix
             _ => {
                 let dp = sp[spl - 1 .. spl].join(""); // should only be lenght 1 anyway
@@ -120,22 +120,17 @@ impl ParsedSubDomain {
             },
         };
         if phrase.len() == 0 {
-            return Err(UrlParseError{details: format!("you provided an empty domain with '{}'!", subdomain_lowercase)})
+            return Err(SubDomainParseError::EmptyDomain.into())
         }
-        if &sub_prefix.len() > &63 {
-            println!("sub_prefix.len() >63 is suspect");
-            return Err(UrlParseError{details: "sub_prefix.len() >63 is suspect".to_string()})
+        if &sub_prefix.len() > &48 {
+            return Err(SubDomainParseError::SubPrefixTooLong(subdomain_lowercase.to_string()))
         }
         if phrase.len() > 100 {
             // This helps with VARCHAR constraints but also avoids suspiciously long entries
-            println!("phrase.len() >100 is suspect");
-            return Err(UrlParseError{details: "phrase.len() >100 is suspect".to_string()})
+            return Err(SubDomainParseError::PhraseTooLong(subdomain_lowercase.to_string()))
         }
         let domain = ParsedDomain{phrase, tsld: tsld.to_string()};
-        Ok(ParsedSubDomain{
-            domain: domain,
-            sub_prefix: sub_prefix,
-        })
+        Ok(ParsedSubDomain{domain, sub_prefix})
     }
 
 }
@@ -148,35 +143,31 @@ impl ParsedEmail {
         format!("{}@{}", self.name_prefix, self.subdomain.to_str())
     }
 
-    pub fn from_str(email: &str) -> Result<Self, UrlParseError> {
+    pub fn from_str(email: &str) -> Result<Self, EmailParseError> {
         if email.matches("@").count() != 1 {
-            return  Err(UrlParseError{details: format!("'{}' should contain exactly one '@'!", email)})
+            return  Err(EmailParseError::DoubleAtSymbol)
         }
         let sp: Vec<&str> = email.split("@").collect();
         let name_prefix = match sp.get(0) {
             Some(val) => val.to_lowercase().trim().to_string(),
-            None => return Err(UrlParseError{details: "how did you not have a name prefix?".to_string()})
+            None => return Err(EmailParseError::NamePrefixMissing)
         };
-        if name_prefix.len() > 63 {
-            // This helps with VARCHAR constraints but also avoids suspiciously long prefixes
-            println!("name_prefix.len() >63 is suspect");
-            return Err(UrlParseError{details: "name_prefix.len() >63 is suspect".to_string()})
+        if name_prefix.len() > 40 {
+            // This avoids suspiciously long prefixes
+            return Err(EmailParseError::NamePrefixTooLong(name_prefix.to_string()))
         }
         let subdomain = match sp.get(1) {
             Some(val) => ParsedSubDomain::from_str(val)?,
-            None => return Err(UrlParseError{details: "how did you not have a subdomain?".to_string()})
+            None => return Err(EmailParseError::SubDomainMissing)
         };
-        Ok(ParsedEmail{
-            subdomain: subdomain,
-            name_prefix: name_prefix,
-        })
+        Ok(ParsedEmail{subdomain, name_prefix})
     }
     
 }
 
 
 impl std::str::FromStr for ParsedEmail {
-    type Err = UrlParseError;
+    type Err = EmailParseError;
 
     fn from_str(email: &str) -> Result<Self, Self::Err> {
         ParsedEmail::from_str(email)
@@ -224,7 +215,7 @@ impl ParsedUrl {
         // attempt to create a WebUrl from a (string) link/url
         let mut link = link.trim().to_lowercase();
         if !link.contains(".") {
-            return Err(UrlParseError{details:format!("The url '{}' does not contain a period.", link)})
+            return Err(UrlParseError::NoPeriod(link.to_string()))
         }
         if !link.starts_with("http") {
             // allow 'sloppy' user input like just "company.com"
@@ -234,9 +225,9 @@ impl ParsedUrl {
         let url = Url::parse(&link)?;
         // if you reach this point, the url library was able to parse it. But can you resolve a subdomain?
         let mut subdom_str = match url.domain() {
-            //note that this library uses "domain" for what is called a "subdomain" elsewhere in this file
+            //note that the url library uses "domain" for what is called a "subdomain" in web_parser.rs 
             Some(val) => val.to_string(),
-            None => return  Err(UrlParseError{details:format!("A subdomain could not be resolved in'{}'", &link)}),
+            None => return  Err(UrlParseError::SubDomainMissing),
         };
         let mut scheme_www_str = url.scheme().to_string(); // typically this starts as http:// or https://
         scheme_www_str.push_str("://");
@@ -255,7 +246,7 @@ impl ParsedUrl {
             path = chars.as_str().to_string();
         }
         if path.len() > 512 {
-            return Err(UrlParseError{details: "path > 254 characters!".to_string()})
+            return Err(UrlParseError::CrazyLongPath(path.len()))
         }
         let sorted_query = match url.query() {
             None => String::new(),
@@ -271,7 +262,7 @@ impl ParsedUrl {
         };
         if sorted_query.len() > 254 {
             // while not technically invalid, this is uncommonly big
-            return Err(UrlParseError{details: "sorted_query > 254 characters!".to_string()})
+            return Err(UrlParseError::CrazyLongPath(sorted_query.len()))
         }
         Ok(ParsedUrl {scheme_www, subdomain, path, sorted_query })
     }
@@ -328,28 +319,136 @@ impl DomainRoot for ParsedUrl {
 }
 
 
+
+/// When the 'scheme' of a url does not match a known format like 'https://' or 'http://www', a
+/// SchemeParseError will be returned 
 #[derive(Debug, PartialEq)]
-pub struct UrlParseError {
-    details: String
+pub struct SchemeParseError {
+    provided: String
 }
 
 
-impl Error for UrlParseError {
-    fn description(&self) -> &str {
-        &self.details
+
+/// Whenever there is an error parsing a URL or an email, a UrlParseError is thrown 
+#[derive(Debug, PartialEq)]
+pub enum SubDomainParseError {
+    /// This error captures an error thrown by the url library 
+    UrlLib(url::ParseError),
+    /// This error indicates that the scheme (like http://www etc.) was not recognized 
+    Scheme(SchemeParseError),
+    /// This error indicates that the top or second level domain is not recongized
+    UnknownTSLD(String),
+    /// This error indicates that parsing a subdomain was attempted with a specified known tsld,
+    /// but they did not match!
+    MismatchTSLD(String, String),
+    /// no domain was provided!
+    EmptyDomain,
+    /// very long subdomain prefixes are suspect
+    SubPrefixTooLong(String),
+    /// very long phrases are suspect
+    PhraseTooLong(String),
+    /// A top or second-level domain was provided, but nothing more 
+    JustTSLD,
+}
+
+
+#[derive(Debug, PartialEq)]
+pub enum UrlParseError {
+    /// the Url library did not give a .domain() (= SubDomain) to parse 
+    SubDomainMissing,
+    /// A SubDomain could not be parsed 
+    SubDomainParse(SubDomainParseError),
+    /// No period was provided '.' was provided in the string -> No *.com, *.org, etc.
+    NoPeriod(String),
+    /// If a path is much too long, this error will be thrown
+    CrazyLongPath(usize),
+    /// If the query is much too long, this error will be thrown 
+    CrazyLongQuery(usize),
+}
+
+#[derive(Debug, PartialEq)]
+pub enum EmailParseError {
+    /// The email contains two or more '@' symbols
+    DoubleAtSymbol,
+    /// The name prefix (the 'j.smith' in 'j.smith@company.com') was missing 
+    NamePrefixMissing,
+    /// The name prefix was suspiciously long (rejects if > 48)
+    NamePrefixTooLong(String),
+    /// No SubDomain was provided after the '@' symbol 
+    SubDomainMissing,
+    /// The SubDomain could not be parsed 
+    SubDomainParse(SubDomainParseError),
+}
+
+
+impl std::error::Error for SchemeParseError {}
+impl std::error::Error for SubDomainParseError {}
+impl std::error::Error for UrlParseError {}
+impl std::error::Error for EmailParseError {}
+
+
+impl fmt::Display for SchemeParseError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+impl fmt::Display for SubDomainParseError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{:?}", self)
     }
 }
 
 
 impl fmt::Display for UrlParseError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f,"{}",self.details)
+        write!(f,"{:?}", self)
     }
 }
 
+impl fmt::Display for EmailParseError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+
+impl From<url::ParseError> for SubDomainParseError {
+    fn from(err: url::ParseError) -> SubDomainParseError {
+        SubDomainParseError::UrlLib(err)
+    }
+}
+
+impl From<SchemeParseError> for SubDomainParseError {
+    fn from(err: SchemeParseError) -> Self {
+        SubDomainParseError::Scheme(err)
+    }
+}
+
+
 impl From<url::ParseError> for UrlParseError {
-    fn from(err: url::ParseError) -> UrlParseError {
-        UrlParseError{details: err.to_string()}
+    fn from(err: url::ParseError) -> Self {
+        let sdpe = SubDomainParseError::from(err);
+        UrlParseError::from(sdpe)
+    }
+}
+
+impl From<SchemeParseError> for UrlParseError {
+    fn from(err: SchemeParseError) -> Self {
+        let sdpe = SubDomainParseError::from(err);
+        UrlParseError::from(sdpe)
+    }
+}
+
+impl From<SubDomainParseError> for UrlParseError {
+    fn from(err: SubDomainParseError) -> Self {
+        UrlParseError::SubDomainParse(err)
+    }
+}
+
+impl From<SubDomainParseError> for EmailParseError {
+    fn from(err: SubDomainParseError) -> Self {
+        EmailParseError::SubDomainParse(err)
     }
 }
 
