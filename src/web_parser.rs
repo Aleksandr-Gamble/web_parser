@@ -73,6 +73,21 @@ impl SchemeWWW {
         };
         Ok(scheme)
     }
+
+    pub fn scheme_id(&self) -> i16 {
+        let id = match *self {
+            SchemeWWW::Http => 1,
+            SchemeWWW::Https => 2,
+            SchemeWWW::HttpWWW => 3,
+            SchemeWWW::HttpsWWW => 4,
+            SchemeWWW::HttpWW2 => 5,
+            SchemeWWW::HttpsWW2 => 9, // somehow 6 has no trailing "." ?
+            SchemeWWW::HttpWWW2 => 7,
+            SchemeWWW::HttpsWWW2 => 8,
+        };
+        id as i16
+    }
+
 }
 
 
